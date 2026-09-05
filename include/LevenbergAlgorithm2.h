@@ -91,14 +91,14 @@ class LevenbergAlgorithm : public Algorithm {
       void AdjModelParams(void);
       
       // Jacobian output functions (restart support)
-      void CheckJacobianFileExists(void);
-      void WriteJacobianToFile(int iteration, std::vector<std::vector<double>> samples, std::vector<double> objectives, std::vector<double> m_BestAlternative, double m_BestObjective);
-      void ReadJacobianFromFile(int iteration, std::vector<std::vector<double>>& samples, std::vector<double>& objectives, std::vector<double>& m_BestAlternative, double& m_BestObjective);
+      void CheckJacobianFileExists(void);                                                          // Fails the analysis if this iteration's Jacobian file already exists
+      void WriteJacobianToFile(int iteration, std::vector<std::vector<double>> samples, std::vector<double> objectives, std::vector<double> m_BestAlternative, double m_BestObjective);  // Writes the Jacobian samples/objectives for this iteration to restart/jacobian_<iteration>.txt
+      void ReadJacobianFromFile(int iteration, std::vector<std::vector<double>>& samples, std::vector<double>& objectives, std::vector<double>& m_BestAlternative, double& m_BestObjective);  // Reads a previously written Jacobian file back, the counterpart to WriteJacobianToFile()
 
       // Lambda output functions (restart support)
-      void CheckLambdaFileExists(void);
-      void WriteLambdaToFile(int iteration, std::vector<double> lambdas, std::vector<std::vector<double>> samples, std::vector<double> objectives, std::vector<double> m_BestAlternative, double m_BestObjective);
-      void ReadLambdaFromFile(int iteration, std::vector<double>& lambdas, std::vector<std::vector<double>>& samples, std::vector<double>& objectives, std::vector<double>& m_BestAlternative, double& m_BestObjective);
+      void CheckLambdaFileExists(void);                                                            // Fails the analysis if this iteration's lambda file already exists
+      void WriteLambdaToFile(int iteration, std::vector<double> lambdas, std::vector<std::vector<double>> samples, std::vector<double> objectives, std::vector<double> m_BestAlternative, double m_BestObjective);  // Writes every lambda trial's parameters/objective for this iteration to restart/lambda_<iteration>.txt
+      void ReadLambdaFromFile(int iteration, std::vector<double>& lambdas, std::vector<std::vector<double>>& samples, std::vector<double>& objectives, std::vector<double>& m_BestAlternative, double& m_BestObjective);  // Reads a previously written lambda file back, the counterpart to WriteLambdaToFile()
 
       //GML-MS routines
       void   GetRndParamSet(MyPoint *Point);

@@ -1453,15 +1453,21 @@ void Algorithm::GetBestSingleObjective(std::vector<double> objectives, double& b
 }
 
 void Algorithm::CheckRestartPath(void) {
-    // Create the restart folder if it does not already exist
+    // Build the path to the restart folder used to hold Jacobian/lambda output for warm starts
     std::filesystem::path restartDir("restart");
+
+    // A pre-existing restart folder means either a prior run is still using it or a warm-started
+    // run left it behind; failing here on a clean start avoids silently overwriting/mixing its
+    // contents with a brand new analysis
     if (std::filesystem::exists(restartDir)){
+        // Compose and log the failure message, then terminate the analysis
         char msg[DEF_STR_SZ];
         sprintf(msg, "Restart folder already exists. Exiting the analysis.");
         LogError(ERR_FILE_IO, msg);
         ExitProgram(1);
 
     } else{
+        // No restart folder yet; create one so the Jacobian/lambda writers have somewhere to write
         std::filesystem::create_directories(restartDir);
     }
 }

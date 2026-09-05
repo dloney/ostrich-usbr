@@ -114,6 +114,17 @@ LevenbergAlgorithm::LevenbergAlgorithm() {
     char tmp2[DEF_STR_SZ];
     IroncladString inputFilename = GetInFileName();
 
+    // StepSize, MaximumIterations, StepTolerance, and MinimumLambdas are all required: without
+    // them the algorithm silently misbehaves (perturbations jump straight to parameter bounds
+    // since StepSize defaults to INFINITY; the run stops after a single iteration since
+    // MaximumIterations defaults to 0; the step-size shrink/convergence check is effectively
+    // disabled since StepToleranceMaximum defaults to 0; and the lambda line search may run with
+    // too few trial lambdas since m_LambdasMinimum silently keeps its default of 1)
+    bool foundStepSize = false;
+    bool foundMaxIterations = false;
+    bool foundStepTolerance = false;
+    bool foundMinimumLambdas = false;
+
     //read in algorithm parameters
     pFile = fopen(inputFilename, "r");
     if (pFile != NULL) {
@@ -122,41 +133,45 @@ LevenbergAlgorithm::LevenbergAlgorithm() {
 
         FindToken(pFile, "BeginLevMarAlg", inputFilename);
         line = GetNxtDataLine(pFile, inputFilename);
-        while (strstr(line, "EndLevMarAlg") == NULL) {            
+        while (strstr(line, "EndLevMarAlg") == NULL) {
             if (strstr(line, "ConvergenceTolerance") != NULL) {
-                // Convergence tolerance 
+                // Convergence tolerance
                 sscanf(line, "%s %lf", tmp, &m_ObjectiveToleranceMaximum);
 
             } else if (strstr(line, "StepSize") != NULL) {
                 // Initial step size for algorithm
                 sscanf(line, "%s %lf", tmp, &m_StepSize);
+                foundStepSize = true;
 
             } else if (strstr(line, "StepScale") != NULL) {
                 // Step size adjustment factor for the algorithm
                 sscanf(line, "%s %lf", tmp, &m_StepSizeScaleFactor);
 
             } else if (strstr(line, "MaximumIterations") != NULL) {
-                //maximum number of iterations
+                // Maximum number of iterations
                 sscanf(line, "%s %d", tmp, &m_NumIterationMaximum);
+                foundMaxIterations = true;
 
             } else if (strstr(line, "StepTolerance") != NULL) {
-                //maximum number of iterations
+                // Step size below which the algorithm is considered converged
                 sscanf(line, "%s %lf", tmp, &m_StepToleranceMaximum);
+                foundStepTolerance = true;
 
             } else if (strstr(line, "MinimumLambdas") != NULL) {
-                //maximum number of iterations
+                // Minimum number of lambdas to try during the line search
                 sscanf(line, "%s %d", tmp, &m_LambdasMinimum);
+                foundMinimumLambdas = true;
 
             } else if (strstr(line, "DerivativeType") != NULL) {
                 // Type of derivative to be used
                 sscanf(line, "%s %s", tmp, tmp2);
 
-                if (strcmp(tmp2, "FirstForward") == 0) { 
+                if (strcmp(tmp2, "FirstForward") == 0) {
                     m_DerivativeType = FIRST_FORWARD;
-                } else if (strcmp(tmp2, "FirstBackward") == 0) { 
+                } else if (strcmp(tmp2, "FirstBackward") == 0) {
                     m_DerivativeType = FIRST_BACKWARD;
-                } else if (strcmp(tmp2, "FirstCental") == 0) { 
-                    m_DerivativeType = FIRST_CENTRAL; 
+                } else if (strcmp(tmp2, "FirstCentral") == 0) {
+                    m_DerivativeType = FIRST_CENTRAL;
                 }
 
             } else {
@@ -165,14 +180,42 @@ LevenbergAlgorithm::LevenbergAlgorithm() {
             }
 
             line = GetNxtDataLine(pFile, inputFilename);
-        } 
-    }
-    else {
-        LogError(ERR_FILE_IO, "Using default algorithm setup.");
+        }
+
+        fclose(pFile);
+
+    } else {
+        // The input file could not be opened at all, so none of the required tokens below could
+        // possibly have been read; compose a specific message and terminate rather than falling
+        // through to the generic per-token checks
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Could not open %s to read the LevMarAlg configuration block.", inputFilename);
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
     }
 
-    fclose(pFile);
-
+    // Fail fast, with a message naming the specific missing token, rather than letting the
+    // analysis run with a silently broken default for any of the four required settings
+    if (!foundStepSize) {
+        // Missing StepSize leaves m_StepSize at its INFINITY default forever
+        LogError(ERR_FILE_IO, "LevMarAlg configuration is missing the required StepSize token.");
+        ExitProgram(1);
+    }
+    if (!foundMaxIterations) {
+        // Missing MaximumIterations leaves m_NumIterationMaximum at 0, ending the run after 1 iteration
+        LogError(ERR_FILE_IO, "LevMarAlg configuration is missing the required MaximumIterations token.");
+        ExitProgram(1);
+    }
+    if (!foundStepTolerance) {
+        // Missing StepTolerance leaves m_StepToleranceMaximum at 0, disabling the step-size/convergence check
+        LogError(ERR_FILE_IO, "LevMarAlg configuration is missing the required StepTolerance token.");
+        ExitProgram(1);
+    }
+    if (!foundMinimumLambdas) {
+        // Missing MinimumLambdas silently keeps m_LambdasMinimum at its default of 1
+        LogError(ERR_FILE_IO, "LevMarAlg configuration is missing the required MinimumLambdas token.");
+        ExitProgram(1);
+    }
 
     IncCtorCount();
 }/* end CTOR */
