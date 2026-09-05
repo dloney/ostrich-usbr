@@ -91,9 +91,12 @@ public:
     
     // Expose functions to inheriting subclasses
     void ConfigureWorkers(void);                                                    // Configure the workders for the solution
-    void ManageSingleObjectiveIterations(std::vector<std::vector<double>> parameters, int startingIndex, int numberOfParameters, 
+    void ManageSingleObjectiveIterations(std::vector<std::vector<double>> parameters, int startingIndex, int numberOfParameters,
                                          std::vector<double>& objectives);          // Solve using a single objective function
     void TerminateWorkers();                                                        // Terminate all workers
+
+    // Common restart functions
+    void CheckRestartPath(void);                                                   // Creates the restart folder, failing if one already exists
 
 private:
     // Working directory information
@@ -158,7 +161,7 @@ private:
     void SendWorkerPreserveBest(int workerRank, bool preserveModel);
     void SendWorkerParameters(int workerRank, int alternativeIndex, std::vector<double> parameters);
 
-    void ReceiveWorkerPreserveBest(void);    
+    void ReceiveWorkerPreserveBest(void);
 
 protected:
     // Set the default groups for the class

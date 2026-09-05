@@ -1452,6 +1452,20 @@ void Algorithm::GetBestSingleObjective(std::vector<double> objectives, double& b
 
 }
 
+void Algorithm::CheckRestartPath(void) {
+    // Create the restart folder if it does not already exist
+    std::filesystem::path restartDir("restart");
+    if (std::filesystem::exists(restartDir)){
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Restart folder already exists. Exiting the analysis.");
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+
+    } else{
+        std::filesystem::create_directories(restartDir);
+    }
+}
+
 /**************************************************************************************************************************************************************
 CheckGlobalSensitivity()
 

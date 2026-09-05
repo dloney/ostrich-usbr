@@ -232,15 +232,6 @@ void LevenbergAlgorithm::Destroy(void) {
 
 
 /******************************************************************************
-WarmStart()
-
-Read the best solution from a previous run.
-******************************************************************************/
-void LevenbergAlgorithm::WarmStart(void) {
-    // todo: create this
-}
-
-/******************************************************************************
 Optimize()
 
 Perform calibration using either Levenberg-Marquardt or GML-MS.
@@ -262,14 +253,43 @@ void LevenbergAlgorithm::Optimize(void) {
     // Create a flag to indicate if in Jacobian or linear search mode
     bool jacobianSolve = false;
 
+    // Enter the solution loop
+    std::vector<double> objectivesJacobian;
+
+    // Recovered lambda search results, populated only when warm starting into WARM_START_FINALIZE
+    std::vector<std::vector<double>> samplesLambdaRecovered;
+    std::vector<double> objectivesLambdaRecovered;
+
+    // Flags to skip the Jacobian/lambda solves on the single resumed iteration, since their
+    // restart files were already recovered by WarmStart() and must not be recomputed/overwritten
+    bool firstPassSkipJacobian = false;
+    bool firstPassSkipLambda = false;
+
     //handle warm start
     if(m_bWarmStart) {
-        //WarmStart();
         // Load a previous analysis that was interrupted
-        std::cout << "Warm start has not been configured for the Levenberg Algorithm. Exiting the analysis..." << std::endl;
-        throw std::invalid_argument("Warm start has not been configured for the Levenberg Algorithm");
+        WarmStartStage stage = WarmStart(samples, objectivesJacobian, lockedParameters, jacobian,
+                                          samplesLambdaRecovered, objectivesLambdaRecovered, lowerValues, upperValues);
+
+        if (stage == WARM_START_JACOBIAN) {
+            // Nothing was recovered for the pending iteration; prepare a fresh Jacobian sample
+            // set, same as a clean start would
+            CalculateJacobianParameters(m_BestAlternative, lowerValues, upperValues, m_StepSize, m_StepToleranceMaximum, m_DerivativeType, samples, lockedParameters);
+            jacobianSolve = true;
+
+        } else {
+            // The Jacobian (and possibly the lambda search) was already recovered for the
+            // pending iteration; skip recomputing it
+            jacobianSolve = false;
+        }
+
+        firstPassSkipJacobian = (stage != WARM_START_JACOBIAN);
+        firstPassSkipLambda = (stage == WARM_START_FINALIZE);
 
     } else {
+        // Check whether restart exists
+        CheckRestartPath();
+
         // Start a clean analysis
         WriteSetup2("LevenbergAlgorithm", m_ExecCmd, m_pObjFunc->GetObjFuncStr(), m_pParamGroup->GetNumParams(), m_pParamGroup->GetNumTiedParams());
         WriteStartingMetrics(); // todo: write this function
@@ -284,7 +304,7 @@ void LevenbergAlgorithm::Optimize(void) {
             currentValues.push_back(temp->GetEstimatedValueTransformed());
             upperValues.push_back(temp->GetUpperBoundTransformed());
             lowerValues.push_back(temp->GetLowerBoundTransformed());
-        }
+        };
 
         // Initialize the sample
         CalculateJacobianParameters(currentValues, lowerValues, upperValues, m_StepSize, m_StepToleranceMaximum, m_DerivativeType, samples, lockedParameters);
@@ -299,14 +319,15 @@ void LevenbergAlgorithm::Optimize(void) {
         jacobianSolve = true;
     }
 
-    // Enter the solution loop
-    std::vector<double> objectivesJacobian;
     bool continueIterations = true;
 
     while (continueIterations) {
 
         // Solve for the Jacobian
-        if (jacobianSolve) {
+        if (jacobianSolve && !firstPassSkipJacobian) {
+            // Check if the Jacobian file exists
+            CheckJacobianFileExists();
+
             // Initialize the objectives for the solve
             objectivesJacobian = std::vector<double>(samples.size(), INFINITY);
 
@@ -340,11 +361,15 @@ void LevenbergAlgorithm::Optimize(void) {
             }
 
             // Write the gradient information to file
+            WriteJacobianToFile(m_Iteration, samples, objectivesJacobian, m_BestAlternative, m_BestObjective);
 
             // Toggle the jacobian solve to indicate lambda compute
             jacobianSolve = false;
 
         }
+
+        // Only applies to the single iteration resumed by a warm start
+        firstPassSkipJacobian = false;
 
         // Keep the best output from the gradient for later comparison
         double bestObjectiveGradient;
@@ -359,6 +384,16 @@ void LevenbergAlgorithm::Optimize(void) {
         double bestLambda;
         int lambdaDirection;
         std::vector<double> objectivesLambda;
+
+        if (!firstPassSkipLambda) {
+        // Check if the Lambda file exists
+        CheckLambdaFileExists();
+
+        // Accumulators for the lambda values, samples, and objectives tried across
+        // every pass of the lambda search performed during this iteration
+        std::vector<double> lambdasAll;
+        std::vector<std::vector<double>> samplesLambdaAll;
+        std::vector<double> objectivesLambdaAll;
 
         while (!jacobianSolve) {
             // Clear the existing samples
@@ -417,6 +452,11 @@ void LevenbergAlgorithm::Optimize(void) {
             // Solve the samples
             ManageSingleObjectiveIterations(samples, 0, m_pParamGroup->GetNumParams(), objectivesLambda);
 
+            // Record this pass of the lambda search into the accumulators
+            lambdasAll.insert(lambdasAll.end(), lambdas.begin(), lambdas.end());
+            samplesLambdaAll.insert(samplesLambdaAll.end(), samples.begin(), samples.end());
+            objectivesLambdaAll.insert(objectivesLambdaAll.end(), objectivesLambda.begin(), objectivesLambda.end());
+
             // Adjust additional lambdas if greater than a single lambda is utilized
             if (lambdas.size() > 1 || m_LambdasMinimum > 1) {
                 // Determine if more Lambdas are necessary
@@ -465,6 +505,20 @@ void LevenbergAlgorithm::Optimize(void) {
                 jacobianSolve = true;
             }
         }
+
+        // Write the accumulated lambda search information to file
+        WriteLambdaToFile(m_Iteration, lambdasAll, samplesLambdaAll, objectivesLambdaAll, m_BestAlternative, m_BestObjective);
+
+        } else {
+            // The lambda search for this iteration was already recovered by WarmStart(); use it
+            // directly instead of recomputing it, and prepare the next iteration to start fresh
+            samples = samplesLambdaRecovered;
+            objectivesLambda = objectivesLambdaRecovered;
+            jacobianSolve = true;
+        }
+
+        // Only applies to the single iteration resumed by a warm start
+        firstPassSkipLambda = false;
 
         // Get the best values from the search
         double bestObjectiveIteration;
@@ -629,7 +683,505 @@ std::vector<double> LevenbergAlgorithm::CreateAdditionalLambdas(double lambda, i
 
 }
 
+/******************************************************************************
+CheckJacobianFileExists()
 
+Checks whether the Jacobian output file for the current iteration already 
+exists in the restart folder. If it does, the analysis is terminated with an
+error written to the OstError file. This check must be performed prior to 
+any Jacobian solves so that existing output is never overwritten.
+******************************************************************************/
+void LevenbergAlgorithm::CheckJacobianFileExists(void) {
+
+    // Construct the path to the Jacobian output file
+    std::filesystem::path jacobianFile = "restart/jacobian_" + std::to_string(m_Iteration) + ".txt";
+
+    // Fail the analysis if the file already exists
+    if (std::filesystem::exists(jacobianFile)) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Jacobian output file %s already exists. Failing the analysis.", jacobianFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+}/* end CheckJacobianFileExists() */
+
+/******************************************************************************
+WriteJacobianToFile()
+
+Writes the parameters and objective values associated with each model solve 
+performed for the Jacobian evaluation of the current iteration to a file in 
+the restart folder. The file is named jacobian_<iteration>.txt, where the 
+iteration number matches m_Iteration (zero indexed). A header line containing
+the parameter names is written at the top of the file, followed by one line 
+per solve containing the untransformed parameter values and the associated 
+objective value, tab separated.
+******************************************************************************/
+void LevenbergAlgorithm::WriteJacobianToFile(int iteration, std::vector<std::vector<double>> samples, std::vector<double> objectives,
+                                             std::vector<double> m_BestAlternative, double m_BestObjective) {
+
+    // Create the restart folder in the working directory if it does not already exist
+    std::filesystem::path restartDir = "restart";
+    if (!std::filesystem::exists(restartDir)) {
+        std::filesystem::create_directories(restartDir);
+    }
+
+    // Construct the path to the Jacobian output file
+    std::filesystem::path jacobianFile = restartDir / ("jacobian_" + std::to_string(iteration) + ".txt");
+
+    // Open the output file
+    FILE* pFile = fopen(jacobianFile.string().c_str(), "w");
+
+    // Write the header line containing the parameter names and the objective column
+    fprintf(pFile, "%s", m_pParamGroup->GetParamPtr(0)->GetName());
+    for (int entry = 1; entry < m_pParamGroup->GetNumParams(); entry++) {
+        fprintf(pFile, "\t%s", m_pParamGroup->GetParamPtr(entry)->GetName());
+    }
+    fprintf(pFile, "\tObjective\n");
+
+    // Write the central location
+    for (int param = 0; param < m_pParamGroup->GetNumParams(); param++) {
+            // Convert the transformed value to the untransformed (natural) value used by the model
+            fprintf(pFile, "%E\t", m_BestAlternative[param]);
+    }
+    fprintf(pFile, "%E\n", m_BestObjective);
+
+    // Write each solve: untransformed parameter values followed by the objective value
+    for (size_t entry = 0; entry < samples.size(); entry++) {
+        // Write the parameters
+        for (int param = 0; param < m_pParamGroup->GetNumParams(); param++) {
+            // Convert the transformed value to the untransformed (natural) value used by the model
+            double untransformed = m_pParamGroup->GetParamPtr(param)->ConvertOutVal(samples[entry][param]);
+            fprintf(pFile, "%E\t", untransformed);
+        }
+
+        // Write the objective
+        fprintf(pFile, "%E\n", objectives[entry]);
+    }
+
+    fclose(pFile);
+}
+
+/******************************************************************************
+ReadJacobianFromFile()
+
+Reads the parameters and objective values associated with each model solve
+performed for the Jacobian evaluation of the given iteration back from
+restart/jacobian_<iteration>.txt, the counterpart to WriteJacobianToFile().
+The central location row is read directly into m_BestAlternative (it was
+written without unit conversion), while each subsequent sample row is
+converted back from the natural (untransformed) units it was written in to
+the transformed units used internally, via ConvertInVal().
+******************************************************************************/
+void LevenbergAlgorithm::ReadJacobianFromFile(int iteration, std::vector<std::vector<double>>& samples, std::vector<double>& objectives,
+                                              std::vector<double>& m_BestAlternative, double& m_BestObjective) {
+
+    // Clear any existing content in the output containers
+    samples.clear();
+    objectives.clear();
+    m_BestAlternative.clear();
+
+    // Construct the path to the Jacobian output file
+    std::filesystem::path jacobianFile = std::filesystem::path("restart") / ("jacobian_" + std::to_string(iteration) + ".txt");
+
+    // Fail the analysis if the file does not exist
+    if (!std::filesystem::exists(jacobianFile)) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Jacobian output file %s does not exist. Failing the analysis.", jacobianFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+    std::ifstream pFile(jacobianFile);
+    int numParams = m_pParamGroup->GetNumParams();
+    std::string line;
+
+    // Skip the header line containing the parameter names and the objective column
+    std::getline(pFile, line);
+
+    // Read the central location (the best point going into the Jacobian evaluation)
+    std::getline(pFile, line);
+    std::istringstream centralStream(line);
+    for (int param = 0; param < numParams; param++) {
+        double value;
+        centralStream >> value;
+        m_BestAlternative.push_back(value);
+    }
+    centralStream >> m_BestObjective;
+
+    // Read each solve: untransformed parameter values followed by the objective value
+    while (std::getline(pFile, line)) {
+        if (line.empty()) { continue; }
+
+        std::istringstream rowStream(line);
+        std::vector<double> sample;
+        for (int param = 0; param < numParams; param++) {
+            double untransformed;
+            rowStream >> untransformed;
+
+            // Convert the untransformed (natural) value back to the transformed value used internally
+            sample.push_back(m_pParamGroup->GetParamPtr(param)->ConvertInVal(untransformed));
+        }
+
+        double objective;
+        rowStream >> objective;
+
+        samples.push_back(sample);
+        objectives.push_back(objective);
+    }
+}
+
+/******************************************************************************
+CheckLambdaFileExists()
+
+Checks whether the lambda search output file for the current iteration already
+exists in the restart folder. If it does, the analysis is terminated with an
+error written to the OstError file. This check must be performed prior to
+any lambda search solves so that existing output is never overwritten.
+******************************************************************************/
+void LevenbergAlgorithm::CheckLambdaFileExists(void) {
+
+    // Construct the path to the lambda output file
+    std::filesystem::path lambdaFile = "restart/lambda_" + std::to_string(m_Iteration) + ".txt";
+
+    // Fail the analysis if the file already exists
+    if (std::filesystem::exists(lambdaFile)) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Lambda output file %s already exists. Failing the analysis.", lambdaFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+}/* end CheckLambdaFileExists() */
+
+/******************************************************************************
+WriteLambdaToFile()
+
+Writes the parameters, lambda value, and objective value associated with each
+model solve performed during the lambda search of the current iteration to a
+file in the restart folder. The file is named lambda_<iteration>.txt, where
+the iteration number matches m_Iteration (zero indexed), and accumulates every
+lambda trial across all passes of the lambda search for that iteration. A
+header line containing the parameter names, followed by a Lambda column and
+an Objective column, is written at the top of the file, followed by one line
+per solve containing the untransformed parameter values, the lambda value used
+to compute that solve, and the associated objective value, tab separated.
+******************************************************************************/
+void LevenbergAlgorithm::WriteLambdaToFile(int iteration, std::vector<double> lambdas, std::vector<std::vector<double>> samples, std::vector<double> objectives,
+                                           std::vector<double> m_BestAlternative, double m_BestObjective) {
+
+    // Create the restart folder in the working directory if it does not already exist
+    std::filesystem::path restartDir = "restart";
+    if (!std::filesystem::exists(restartDir)) {
+        std::filesystem::create_directories(restartDir);
+    }
+
+    // Construct the path to the lambda output file
+    std::filesystem::path lambdaFile = restartDir / ("lambda_" + std::to_string(iteration) + ".txt");
+
+    // Open the output file
+    FILE* pFile = fopen(lambdaFile.string().c_str(), "w");
+
+    // Write the header line containing the parameter names, the lambda column, and the objective column
+    fprintf(pFile, "%s", m_pParamGroup->GetParamPtr(0)->GetName());
+    for (int entry = 1; entry < m_pParamGroup->GetNumParams(); entry++) {
+        fprintf(pFile, "\t%s", m_pParamGroup->GetParamPtr(entry)->GetName());
+    }
+    fprintf(pFile, "\tLambda\tObjective\n");
+
+    // Write the central location (the best point going into this iteration's lambda search)
+    for (int param = 0; param < m_pParamGroup->GetNumParams(); param++) {
+            // Convert the transformed value to the untransformed (natural) value used by the model
+            fprintf(pFile, "%E\t", m_BestAlternative[param]);
+    }
+    fprintf(pFile, "NA\t%E\n", m_BestObjective);
+
+    // Write each solve: untransformed parameter values, the lambda used, and the objective value
+    for (size_t entry = 0; entry < samples.size(); entry++) {
+        // Write the parameters
+        for (int param = 0; param < m_pParamGroup->GetNumParams(); param++) {
+            // Convert the transformed value to the untransformed (natural) value used by the model
+            double untransformed = m_pParamGroup->GetParamPtr(param)->ConvertOutVal(samples[entry][param]);
+            fprintf(pFile, "%E\t", untransformed);
+        }
+
+        // Write the lambda value and the objective
+        fprintf(pFile, "%E\t%E\n", lambdas[entry], objectives[entry]);
+    }
+
+    fclose(pFile);
+}
+
+/******************************************************************************
+ReadLambdaFromFile()
+
+Reads the parameters, lambda value, and objective value associated with each
+model solve performed during the lambda search of the given iteration back
+from restart/lambda_<iteration>.txt, the counterpart to WriteLambdaToFile().
+The central location row is read directly into m_BestAlternative (it was
+written without unit conversion) and its Lambda field ("NA") is discarded,
+while each subsequent sample row is converted back from the natural
+(untransformed) units it was written in to the transformed units used
+internally, via ConvertInVal().
+******************************************************************************/
+void LevenbergAlgorithm::ReadLambdaFromFile(int iteration, std::vector<double>& lambdas, std::vector<std::vector<double>>& samples, std::vector<double>& objectives,
+                                            std::vector<double>& m_BestAlternative, double& m_BestObjective) {
+
+    // Clear any existing content in the output containers
+    lambdas.clear();
+    samples.clear();
+    objectives.clear();
+    m_BestAlternative.clear();
+
+    // Construct the path to the lambda output file
+    std::filesystem::path lambdaFile = std::filesystem::path("restart") / ("lambda_" + std::to_string(iteration) + ".txt");
+
+    // Fail the analysis if the file does not exist
+    if (!std::filesystem::exists(lambdaFile)) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Lambda output file %s does not exist. Failing the analysis.", lambdaFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+    std::ifstream pFile(lambdaFile);
+    int numParams = m_pParamGroup->GetNumParams();
+    std::string line;
+
+    // Skip the header line containing the parameter names, the lambda column, and the objective column
+    std::getline(pFile, line);
+
+    // Read the central location (the best point going into this iteration's lambda search)
+    std::getline(pFile, line);
+    std::istringstream centralStream(line);
+    for (int param = 0; param < numParams; param++) {
+        double value;
+        centralStream >> value;
+        m_BestAlternative.push_back(value);
+    }
+
+    // Discard the "NA" placeholder in the Lambda column, then read the objective
+    std::string lambdaPlaceholder;
+    centralStream >> lambdaPlaceholder;
+    centralStream >> m_BestObjective;
+
+    // Read each solve: untransformed parameter values, the lambda used, and the objective value
+    while (std::getline(pFile, line)) {
+        if (line.empty()) { continue; }
+
+        std::istringstream rowStream(line);
+        std::vector<double> sample;
+        for (int param = 0; param < numParams; param++) {
+            double untransformed;
+            rowStream >> untransformed;
+
+            // Convert the untransformed (natural) value back to the transformed value used internally
+            sample.push_back(m_pParamGroup->GetParamPtr(param)->ConvertInVal(untransformed));
+        }
+
+        double lambda;
+        double objective;
+        rowStream >> lambda;
+        rowStream >> objective;
+
+        samples.push_back(sample);
+        lambdas.push_back(lambda);
+        objectives.push_back(objective);
+    }
+}
+
+/******************************************************************************
+WarmStart()
+
+Resumes a previously interrupted analysis in three steps:
+  1) Replays every completed iteration recorded in OstOutput0.txt to recreate
+     the solve history (m_Iteration, m_BestObjective, m_BestAlternative,
+     m_ObjectiveTolerance, and m_StepSize, the latter by replaying the
+     step-size shrink rule since it is not otherwise persisted).
+  2) Checks the restart folder for a Jacobian and/or lambda file belonging to
+     the pending iteration (the one immediately following the last one
+     recorded in OstOutput0.txt) and, if found, reads them back so that the
+     corresponding model solves do not need to be repeated.
+  3) Returns the stage at which Optimize() should resume:
+       WARM_START_JACOBIAN  - nothing recovered; compute a fresh Jacobian.
+       WARM_START_LAMBDA    - Jacobian recovered; run the lambda search fresh.
+       WARM_START_FINALIZE  - Jacobian and lambda search both recovered;
+                               finalize the iteration using the recovered data.
+
+samples/objectivesJacobian/lockedParameters/jacobian are populated whenever a
+Jacobian is recovered (WARM_START_LAMBDA or WARM_START_FINALIZE);
+samplesLambda/objectivesLambda are populated only for WARM_START_FINALIZE.
+lowerValues/upperValues are always populated, since Optimize() needs them
+regardless of which stage is returned.
+******************************************************************************/
+WarmStartStage LevenbergAlgorithm::WarmStart(std::vector<std::vector<double>>& samples, std::vector<double>& objectivesJacobian, std::vector<bool>& lockedParameters,
+                                             std::vector<std::vector<double>>& jacobian, std::vector<std::vector<double>>& samplesLambda, std::vector<double>& objectivesLambda,
+                                             std::vector<double>& lowerValues, std::vector<double>& upperValues) {
+
+    int numParams = m_pParamGroup->GetNumParams();
+
+    // Parameter bounds are needed regardless of which stage is returned
+    lowerValues.clear();
+    upperValues.clear();
+    for (int entry = 0; entry < numParams; entry++) {
+        ParameterABC* temp = m_pParamGroup->GetParamPtr(entry);
+        lowerValues.push_back(temp->GetLowerBoundTransformed());
+        upperValues.push_back(temp->GetUpperBoundTransformed());
+    }
+
+    // Step 1: recreate the solve history from OstOutput0.txt
+    std::filesystem::path outputFile = "OstOutput0.txt";
+    if (!std::filesystem::exists(outputFile)) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Warm start requested, but %s was not found. There is no solve history to resume from. Failing the analysis.", outputFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+    std::ifstream inFile(outputFile);
+    std::string line;
+    bool foundIterationLine = false;
+    int lastIteration = -1;
+    double lastObjective = INFINITY;
+    double lastTolerance = INFINITY;
+    std::vector<double> lastAlternative;
+
+    while (std::getline(inFile, line)) {
+        // Split the line on whitespace
+        std::istringstream lineStream(line);
+        std::vector<std::string> tokens;
+        std::string token;
+        while (lineStream >> token) { tokens.push_back(token); }
+
+        // An iteration record has at least (iteration, objective, <numParams params>, convergence)
+        if ((int)tokens.size() < numParams + 3) { continue; }
+
+        // Only an iteration record starts with a plain integer; skip banners/disclaimers/headers
+        char* endPtr;
+        long iterationCandidate = strtol(tokens[0].c_str(), &endPtr, 10);
+        if (*endPtr != '\0') { continue; }
+
+        // Replay the step-size shrink rule for the previously-recovered iteration, now that we
+        // know another iteration completed after it
+        if (foundIterationLine) {
+            if (lastTolerance <= m_ObjectiveToleranceMaximum && m_StepSize >= m_StepToleranceMaximum) {
+                m_StepSize /= m_StepSizeScaleFactor;
+            }
+        }
+
+        // Extract the fields: iteration, objective, the numParams parameter columns
+        // immediately before the convergence column, and the convergence column itself
+        lastIteration = (int)iterationCandidate;
+        lastObjective = strtod(tokens[1].c_str(), NULL);
+        lastTolerance = strtod(tokens.back().c_str(), NULL);
+
+        lastAlternative.clear();
+        for (int param = 0; param < numParams; param++) {
+            double untransformed = strtod(tokens[tokens.size() - 1 - numParams + param].c_str(), NULL);
+            lastAlternative.push_back(m_pParamGroup->GetParamPtr(param)->ConvertInVal(untransformed));
+        }
+
+        foundIterationLine = true;
+    }
+
+    if (!foundIterationLine) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Warm start requested, but no completed iterations were found in %s. Failing the analysis.", outputFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+    // Replay the step-size shrink rule once more for the last completed iteration itself
+    if (lastTolerance <= m_ObjectiveToleranceMaximum && m_StepSize >= m_StepToleranceMaximum) {
+        m_StepSize /= m_StepSizeScaleFactor;
+    }
+
+    // Recover the state as of the end of the last completed iteration; the pending iteration is
+    // the one immediately following it
+    m_Iteration = lastIteration + 1;
+    m_BestObjective = lastObjective;
+    m_ObjectiveTolerance = lastTolerance;
+    m_BestAlternative = lastAlternative;
+
+    // Step 2: recover the most recent Jacobian/lambda state for the pending iteration
+    std::filesystem::path jacobianFile = std::filesystem::path("restart") / ("jacobian_" + std::to_string(m_Iteration) + ".txt");
+    std::filesystem::path lambdaFile = std::filesystem::path("restart") / ("lambda_" + std::to_string(m_Iteration) + ".txt");
+
+    if (!std::filesystem::exists(jacobianFile)) {
+        // Nothing further was computed for the pending iteration; resume with a fresh Jacobian
+        return WARM_START_JACOBIAN;
+    }
+
+    // Recover the Jacobian samples/objectives evaluated for the pending iteration
+    std::vector<double> jacobianBestAlternative;
+    double jacobianBestObjective;
+    ReadJacobianFromFile(m_Iteration, samples, objectivesJacobian, jacobianBestAlternative, jacobianBestObjective);
+
+    // Sanity check: the recovered Jacobian's reference objective should match the objective
+    // recovered from the solve history, since both represent the same point in the analysis
+    if (std::abs(jacobianBestObjective - m_BestObjective) > (1E-6 * std::abs(m_BestObjective) + 1E-12)) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Warm start restart data is inconsistent: %s does not correspond to the solve history in %s. Failing the analysis.",
+                jacobianFile.string().c_str(), outputFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+    // The FIRST_CENTRAL Jacobian file only records the "upper" perturbation location for each
+    // unlocked parameter (the "lower" location is discarded once the derivative is computed), so
+    // there is not enough information left on disk to recompute a true central difference here.
+    // Fall back to a fresh Jacobian for this derivative type rather than silently substituting a
+    // different (one-sided) approximation.
+    if (m_DerivativeType == FIRST_CENTRAL) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Recovered Jacobian data for iteration %d cannot be reused with FirstCentral derivatives; recomputing the Jacobian instead.", m_Iteration);
+        LogError(ERR_FILE_IO, msg);
+
+        samples.clear();
+        objectivesJacobian.clear();
+        CalculateJacobianParameters(m_BestAlternative, lowerValues, upperValues, m_StepSize, m_StepToleranceMaximum, m_DerivativeType, samples, lockedParameters);
+        return WARM_START_JACOBIAN;
+    }
+
+    // Reconstruct which parameters were locked out of the Jacobian evaluation: every recovered
+    // sample differs from the best alternative in exactly the one parameter that was perturbed to
+    // compute it, so any parameter that never differs across every sample was locked
+    lockedParameters = std::vector<bool>(numParams, true);
+    for (size_t entry = 0; entry < samples.size(); entry++) {
+        for (int param = 0; param < numParams; param++) {
+            if (samples[entry][param] != m_BestAlternative[param]) {
+                lockedParameters[param] = false;
+            }
+        }
+    }
+
+    // Recompute the Jacobian matrix from the recovered samples/objectives
+    CalculateJacobian2(m_BestAlternative, m_BestObjective, objectivesJacobian, samples, m_DerivativeType, lockedParameters, jacobian);
+
+    if (!std::filesystem::exists(lambdaFile)) {
+        // The Jacobian was completed but the lambda search was not; resume with a fresh lambda search
+        return WARM_START_LAMBDA;
+    }
+
+    // Recover the lambda search results evaluated for the pending iteration
+    std::vector<double> lambdas;
+    std::vector<double> lambdaBestAlternative;
+    double lambdaBestObjective;
+    ReadLambdaFromFile(m_Iteration, lambdas, samplesLambda, objectivesLambda, lambdaBestAlternative, lambdaBestObjective);
+
+    // Sanity check: the recovered lambda search's reference objective should match the objective
+    // recovered from the solve history, since both represent the same point in the analysis
+    if (std::abs(lambdaBestObjective - m_BestObjective) > (1E-6 * std::abs(m_BestObjective) + 1E-12)) {
+        char msg[DEF_STR_SZ];
+        sprintf(msg, "Warm start restart data is inconsistent: %s does not correspond to the solve history in %s. Failing the analysis.",
+                lambdaFile.string().c_str(), outputFile.string().c_str());
+        LogError(ERR_FILE_IO, msg);
+        ExitProgram(1);
+    }
+
+    // Both the Jacobian and the lambda search were completed; resume by finalizing the iteration
+    return WARM_START_FINALIZE;
+}
 
 /******************************************************************************
 CopyPoint()

@@ -30,6 +30,8 @@ Version History
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <fstream>
+#include <sstream>
 
 // Include custom classes
 #include "Algorithm.h"
@@ -44,14 +46,26 @@ Version History
 
 
 
+// Indicates where Optimize() should resume the solve after a warm start, based on which
+// restart files were recovered for the pending iteration
+typedef enum WARM_START_STAGE {
+   WARM_START_JACOBIAN,    /* nothing recovered for the pending iteration; compute a fresh Jacobian */
+   WARM_START_LAMBDA,      /* Jacobian recovered; run the lambda search fresh */
+   WARM_START_FINALIZE     /* Jacobian and lambda search both recovered; finalize the iteration */
+}WarmStartStage;
+
 class LevenbergAlgorithm : public Algorithm {
    public:
       LevenbergAlgorithm(void);
       ~LevenbergAlgorithm(void){ DBG_PRINT("LevenbergAlgorithm::DTOR"); Destroy(); }
-      void Destroy(void);            
+      void Destroy(void);
 
-      // Define the sampling function used by the LM algorithm
-      void WarmStart(void);
+      // Resumes a previously interrupted analysis. Recovers solve history from the OstOutput
+      // file and Jacobian/lambda state from the restart folder, and returns the stage at which
+      // Optimize() should resume; see the definition for details on the output parameters.
+      WarmStartStage WarmStart(std::vector<std::vector<double>>& samples, std::vector<double>& objectivesJacobian, std::vector<bool>& lockedParameters,
+                               std::vector<std::vector<double>>& jacobian, std::vector<std::vector<double>>& samplesLambda, std::vector<double>& objectivesLambda,
+                               std::vector<double>& lowerValues, std::vector<double>& upperValues);
 
       // Solution funcitons
       void Optimize(void);
@@ -74,7 +88,17 @@ class LevenbergAlgorithm : public Algorithm {
       void CalcUpgrade(void);
       void CalcGamma(void);
       void CalcBeta(void);
-      void AdjModelParams(void);      
+      void AdjModelParams(void);
+      
+      // Jacobian output functions (restart support)
+      void CheckJacobianFileExists(void);
+      void WriteJacobianToFile(int iteration, std::vector<std::vector<double>> samples, std::vector<double> objectives, std::vector<double> m_BestAlternative, double m_BestObjective);
+      void ReadJacobianFromFile(int iteration, std::vector<std::vector<double>>& samples, std::vector<double>& objectives, std::vector<double>& m_BestAlternative, double& m_BestObjective);
+
+      // Lambda output functions (restart support)
+      void CheckLambdaFileExists(void);
+      void WriteLambdaToFile(int iteration, std::vector<double> lambdas, std::vector<std::vector<double>> samples, std::vector<double> objectives, std::vector<double> m_BestAlternative, double m_BestObjective);
+      void ReadLambdaFromFile(int iteration, std::vector<double>& lambdas, std::vector<std::vector<double>>& samples, std::vector<double>& objectives, std::vector<double>& m_BestAlternative, double& m_BestObjective);
 
       //GML-MS routines
       void   GetRndParamSet(MyPoint *Point);
